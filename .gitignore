@@ -1,0 +1,16 @@
+# Build outputs
+bin/
+*.o
+*.obj
+*.exe
+*.out
+
+# Logs
+*.log
+*.pid
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
