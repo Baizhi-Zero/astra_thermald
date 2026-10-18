@@ -1,8 +1,59 @@
 # AstraThermald
 
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Platform: Android](https://img.shields.io/badge/Platform-Android%2014%20(GKI%206.1)-green.svg)]()
+[![Target: SM8650](https://img.shields.io/badge/Target-Snapdragon%208%20Gen%203-red.svg)]()
+[![Build: NDK Clang](https://img.shields.io/badge/Build-NDK%20r26%20Clang-success.svg)]()
+[![Authors: Baizhi & Gemini](https://img.shields.io/badge/Authors-Baizhi%20%26%20Gemini-orange.svg)]()
+
 专为高通骁龙 8 Gen 3（SM8650，例如 Redmi K70 Pro / Xiaomi 14 系列等）编写的用户态温控接管守护进程。
 
 开发这个项目的初衷是为了彻底替代系统原厂的 `mi_thermald`，解决高负载场景下激进拔核、游戏掉帧卡顿的问题，同时避免像传统“温控拜拜”那样粗暴删除温控导致快充失效和机身过热无法自保。
+
+---
+
+## 架构与数据流 (Architecture & Data Flow)
+
+```mermaid
+flowchart TD
+    subgraph SENSORS ["硬件采样层 (Hardware Sensors)"]
+        NTC["7-NTC 传感矩阵<br>(电池 / 主板静区 / 功放 / 充电 / WiFi / CPU)"]
+        SCFG["场景感知节点<br>(/sys/.../sconfig)"]
+        SCR["屏幕状态<br>(screen_state)"]
+    end
+
+    subgraph CORE ["核心调谐引擎 (Astra Core Engine)"]
+        HUB["Sensor Hub 传感中枢<br>(断线自愈 / 异常容错 / 跨源校验)"]
+        EMA["虚拟握持温度合成<br>(加权矩阵 + EMA 滑动滤波 α=0.25)"]
+        SCENE["场景状态机<br>(原神/星铁/王者 -> 电竞档; 日常 -> 温和档)"]
+        ARBITER["Step-Wise 仲裁器<br>(带迟滞回差平滑升降频)"]
+    end
+
+    subgraph SAFETY ["硬件安全护盾 (Safety Guard)"]
+        FCC["120W 快充梯级退让<br>(22A -> 500mA PID 控温)"]
+        LED["65°C 闪光灯硬件熔断"]
+        HOTPLUG["8 核全在线锁死<br>(粉碎 MONITOR-CCC 拔核)"]
+    end
+
+    subgraph SYSFS ["内核执行节点 (Kernel / Sysfs Targets)"]
+        DEV_CPU["/sys/.../cpu_limits (CPU 簇频点上限)"]
+        DEV_GPU["cooling_device* (动态匹配 GPU 档位)"]
+        DEV_CHG["constant_charge_current (快充电流上限)"]
+        DEV_CORE["/sys/devices/system/cpu/cpu*/online"]
+    end
+
+    NTC --> HUB --> EMA
+    SCR --> HUB
+    EMA --> ARBITER
+    EMA --> SAFETY
+
+    SCFG --> SCENE --> ARBITER
+
+    ARBITER --> DEV_CPU
+    ARBITER --> DEV_GPU
+    SAFETY --> DEV_CHG
+    SAFETY --> DEV_CORE
+```
 
 ---
 
