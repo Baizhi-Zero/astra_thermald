@@ -1,14 +1,14 @@
 # AstraThermald
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Platform: Android](<https://img.shields.io/badge/Platform-Android%2014%2B%20(GKI%206.1)-green.svg>)]()
+[![Platform: Android](https://img.shields.io/badge/Platform-Android%2014%20(GKI%206.1)-green.svg)]()
 [![Target: SM8650](https://img.shields.io/badge/Target-Snapdragon%208%20Gen%203-red.svg)]()
-[![Build: NDK Clang](https://img.shields.io/badge/Build-NDK%20r26%2B%20Clang-success.svg)]()
+[![Build: NDK Clang](https://img.shields.io/badge/Build-NDK%20r26%20Clang-success.svg)]()
 [![Authors: Baizhi & Gemini](https://img.shields.io/badge/Authors-Baizhi%20%26%20Gemini-orange.svg)]()
 
-专为高通骁龙 8 Gen 3（SM8650，例如 Redmi K70 Pro / `manet` 等机型）编写的用户态独立温控守护进程。
+专为高通骁龙 8 Gen 3（SM8650，例如 Redmi K70 Pro / Xiaomi 14 系列等）编写的用户态温控接管守护进程。
 
-做这个项目的初衷很简单：原厂 `mi_thermald` 在高负载下停核（`MONITOR-CCC`）和降频阶梯太激进，容易造成瞬时掉帧；而传统的“温控拜拜”直接删掉温控又会导致 120W 快充失去电流阶梯保护、手电筒高温无法自保。AstraThermald 选择在用户态接管 `mi_thermald`，锁死 8 核在线、平滑升降频阶梯，同时把快充降流与硬件过热底线完整保留下来。
+开发这个项目的初衷是为了彻底替代系统原厂的 `mi_thermald`，解决高负载场景下激进拔核、游戏掉帧卡顿的问题，同时避免像传统“温控拜拜”那样粗暴删除温控导致快充失效和机身过热无法自保。
 
 ---
 
@@ -16,146 +16,130 @@
 
 ```mermaid
 flowchart TD
-    subgraph SENSORS ["硬件采样层 (Pre-opened Sysfs FDs)"]
-        NTC["7-NTC 传感矩阵<br>(battery / quiet / pa0 / pa1 / charger0 / wifi / cpu)"]
-        FLASH["专用安全传感<br>(flash_therm)"]
-        SCFG["场景码节点<br>(/sys/.../sconfig 周期轮询)"]
+    subgraph SENSORS ["硬件采样层 (Hardware Sensors)"]
+        NTC["7-NTC 传感矩阵<br>(电池 / 主板静区 / 功放 / 充电 / WiFi / CPU)"]
+        SCFG["场景感知节点<br>(/sys/.../sconfig)"]
         SCR["屏幕状态<br>(screen_state)"]
     end
 
     subgraph CORE ["核心调谐引擎 (Astra Core Engine)"]
-        HUB["Sensor Hub 传感中枢<br>(strtol 严格解析 / 真实有效性位图 / 断线重连)"]
-        SYNTH["Virtual Synth 虚拟壳温合成<br>(Formula v2 10°C 毛刺抑制 + EMA α=0.25)"]
-        XVAL["跨源物理基准校验<br>(60% 电池 + 40% 静区物理锚点，>12°C 偏离收敛)"]
-        ARBITER["Chrono Step-Wise 仲裁器<br>(真实单调时钟 dt_ms 积分 + 回滞死区 + Desired/Applied 闭环)"]
+        HUB["Sensor Hub 传感中枢<br>(断线自愈 / 异常容错 / 跨源校验)"]
+        EMA["虚拟握持温度合成<br>(加权矩阵 + EMA 滑动滤波 α=0.25)"]
+        SCENE["场景状态机<br>(原神/星铁/王者 -> 电竞档; 日常 -> 温和档)"]
+        ARBITER["Step-Wise 仲裁器<br>(带迟滞回差平滑升降频)"]
     end
 
     subgraph SAFETY ["硬件安全护盾 (Safety Guard)"]
-        FCC["120W 快充控流状态机<br>(内置 9 阶阈值 / 外部 SIC PI 闭环 + 55°C 500mA 紧急覆盖)"]
-        LED["65°C 闪光灯硬件熔断<br>(<=62°C 自动写 0 解除)"]
-        HOTPLUG["8 核在线看护<br>(写入后回读确认 online==1)"]
+        FCC["120W 快充梯级退让<br>(22A -> 500mA PID 控温)"]
+        LED["65°C 闪光灯硬件熔断"]
+        HOTPLUG["8 核全在线锁死<br>(粉碎 MONITOR-CCC 拔核)"]
     end
 
     subgraph SYSFS ["内核执行节点 (Kernel / Sysfs Targets)"]
-        DEV_CPU["/sys/.../cpu_limits<br>(动态探测 policy0/2/5/7 真实满频)"]
-        DEV_GPU["cooling_device* (type=='gpu')<br>(动态匹配并按 max_state 限幅)"]
-        DEV_BR["thermal_max_brightness<br>(可选屏幕亮度温控限额)"]
-        DEV_CHG["constant_charge_current<br>(快充电流上限 uA)"]
-        DEV_CORE["/sys/devices/system/cpu/cpu1..7/online"]
+        DEV_CPU["/sys/.../cpu_limits (CPU 簇频点上限)"]
+        DEV_GPU["cooling_device* (动态匹配 GPU 档位)"]
+        DEV_CHG["constant_charge_current (快充电流上限)"]
+        DEV_CORE["/sys/devices/system/cpu/cpu*/online"]
     end
 
-    NTC --> HUB --> SYNTH --> XVAL
-    FLASH --> HUB --> LED
+    NTC --> HUB --> EMA
     SCR --> HUB
-    XVAL --> ARBITER
-    XVAL --> FCC
+    EMA --> ARBITER
+    EMA --> SAFETY
 
-    SCFG --> ARBITER
+    SCFG --> SCENE --> ARBITER
 
     ARBITER --> DEV_CPU
     ARBITER --> DEV_GPU
-    ARBITER --> DEV_BR
-    FCC --> DEV_CHG
-    HOTPLUG --> DEV_CORE
+    SAFETY --> DEV_CHG
+    SAFETY --> DEV_CORE
 ```
 
 ---
 
-## 功能实现状态与边界说明
+## 为什么做这个项目？
 
-为了便于开发者对照审查，下表列出了各子系统的真实代码实现范围：
+目前小米 HyperOS / MIUI 官方的温控机制主要存在两个问题：
+1. **激进拔核（MONITOR-CCC 机制）**：重载游戏（如原神、星铁）温度稍高时，系统会直接拔掉 Cortex-X4 超大核甚至大核，核心反复脱机/上线引发瞬时卡顿和掉帧。
+2. **频点阶梯过于陡峭**：降频策略缺少回差阻尼，容易在临界温度附近高频跳档（温控打架）。
 
-| 模块 / 特性                            |    当前状态     | 实现说明                                                                                                                                                                                                                    |
-| :------------------------------------- | :-------------: | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **7-NTC 虚拟温度合成**                 | **Implemented** | 默认采用原厂 `[VIRTUAL-SENSOR0]` 权重 + Formula v2（$10.0^\circ\text{C}$ 单周期突变拦截，连续 3 帧放行）+ EMA（$\alpha=0.25$）；支持通过 `-c` 从外部配置动态注入自定义权重与补偿值。                                        |
-| **跨源温度交叉校验**                   | **Implemented** | 已接入主循环。当电池与主板静区物理读数均真实有效时，对比合成温度与物理基准（`0.6 * batt + 0.4 * quiet`），温差 $>12.0^\circ\text{C}$ 时按比例融合收敛，避免使用自写自读的 `board_sensor_temp`。                             |
-| **CPU 4 簇 Step-Wise 控频**            | **Implemented** | 启动时读取 `policy{0,2,5,7}/cpuinfo_max_freq` 真实上限，基于 `CLOCK_MONOTONIC` 真实毫秒差 `dt_ms` 执行升档/降档滞留积分，写入失败自动重开 FD 重试。                                                                         |
-| **GPU `cooling_device` 控频**          | **Implemented** | 遍历 `cooling_device0..127` 严格校验 `type == "gpu"`（拒绝硬编码 cdev 编号），读取 `max_state` 限幅；启动首周期主动写 `0` 清除原厂遗留降频锁。                                                                              |
-| **120W 快充 FCC 保护**                 | **Implemented** | 内置模式采用 9 档温度阶梯（$22\text{A} \to 500\text{mA}$）与极端过热（壳温 $\ge 55^\circ\text{C}$ 或电池 $\ge 48^\circ\text{C}$）$500\text{mA}$ 紧急覆盖统一仲裁；加载外部配置时支持 `[SIC-BAT]` 增量式 PI 控流。           |
-| **闪光灯 $65^\circ\text{C}$ 防烧保护** | **Implemented** | 仅当 `flash_therm` 物理读数真实有效（非 fallback 值）且 $\ge 65^\circ\text{C}$ 时向 `temp_state` 写 `110100004`；回落至 $\le 62^\circ\text{C}$ 时显式写回 `0`/初始值解除锁定。                                              |
-| **`sconfig` 动态场景感知**             | **Implemented** | 采用预开 FD 周期轮询 `/sys/class/thermal/thermal_message/sconfig`（非 `inotify`），识别游戏场景码（如 `6, 18, 19, 20, 25, 26, 76, 501, 700, 707`）自动切入 `ESPORTS` 档。                                                   |
-| **`mi_thermald` 接管与恢复**           | **Implemented** | 记录接管前服务初始状态，通过 Android `init` 属性（`ctl.stop mi_thermald`）停止服务并轮询确认 `init.svc.mi_thermald == stopped`；**全程零 `/proc` 目录遍历**。                                                               |
-| **外部 Supervisor 崩溃恢复**           | **Implemented** | 配套独立启动器 `astra_launcher` 在进程外监控 `astra_thermald`；若守护进程因 `SIGSEGV/SIGABRT/SIGKILL` 异常终止，由外部 Supervisor 恢复启动前硬件快照并拉起 `mi_thermald`。                                                  |
-| **外部 `.conf` 配置规则支持**          |   **Partial**   | 完整解析并严格校验数组长度一致性。其中 `[ss]`（CPU 4 簇）、`[monitor]`（`gpu` 与 `thermal_max_brightness`）、`[sic]`（快充）和 `[virtual]` 已绑定执行器；其余外设规则（如 `modem`/`wifi`/`cdsp`）仅做语法校验，不干预硬件。 |
+很多玩家会选择用 Magisk/KernelSU 模块直接干掉温控（俗称“温控拜拜”），但这样做的副作用同样明显：
+- **失去快充电流保护**：120W / 90W 澎湃秒充失去温控调节，发热时无法阶梯降流，存在电池鼓包与热失控隐患。
+- **失去极端保护**：闪光灯没有高温熔断自保，强行常亮可能烧坏灯珠。
+
+**AstraThermald** 的思路不是“粗暴干掉温控”，而是**重新实现一套更合理、更平滑的温控守护**：
+- **锁死 8 核全在线**：彻底封印拔核逻辑，确保高负载场景下全核心稳定调度。
+- **7-NTC 热敏电阻加权合成**：复刻原厂握持温度加权算法，并加入 EMA 指数平滑滤波，消除温阶抖动。
+- **保留物理安全底线**：完整保留 120W 快充阶梯降流（22A ~ 500mA）和 65°C 闪光灯硬件熔断保护。
+- **自动场景感知**：监听系统的 `sconfig` 状态，打游戏自动切激进电竞策略，日常使用切温和省电策略。
 
 ---
 
-## 关于厂商配置解密与合规说明（Cleanroom 实现）
+## 关于专有密钥与合规说明（Cleanroom 实现）
 
-小米官方在 `/vendor/etc/thermal-map.conf` 及 `/odm/etc/thermal-*.conf` 中的策略配置采用了 AES-128-CBC 加密。
+小米官方的部分温控策略配置文件（如 `/vendor/etc/thermal-map.conf`）使用了 AES-128-CBC 加密。
 
-**本项目在源码和编译产物中均未硬编码任何厂商私有密钥或 IV。**
+**为了保障合规，本项目在源码和发布二进制中未硬编码任何厂商的私有密钥与 IV。**
 
-当用户通过 `-c` 指定加载加密的官方 `.conf` 文件时，AstraThermald 会在运行时以只读方式读取用户本机的 `/vendor/bin/mi_thermald` ELF64 二进制文件：
+如果用户选择加载并解密官方的 `.conf` 配置文件，AstraThermald 会在运行时以只读方式打开用户自己手机上的 `/vendor/bin/mi_thermald`，通过内存模式扫描就地读取该设备所用的密钥进行解密。提取与解密全部在用户本地手机内存中完成，数据不离机。
 
-1. 优先解析 ELF64 `.rela.dyn` 重定位表中的相邻 `R_AARCH64_RELATIVE` GOT 指针项，定位数据段中的 16 字节 Key 与 IV 字符串（不要求 Key 与 IV 内容相同）；
-2. 对提取出的候选 Key/IV 使用当前密文分组执行 PKCS#7 Padding 试解密闭环验证；
-3. 提取与解密全程在用户手机本地内存中完成，数据不离机。
+---
+
+## 核心特性
+
+- **永不拔核**：启动后严密防守 CPU 核心在线状态，且避免高频重复写 `online` 节点引发的内核锁争夺。
+- **平滑温控**：机身握持温度采用 7 路物理 NTC（电池、主板静区、功放、充电芯片、WiFi、CPU 等）加权合成，配合迟滞回差（Hysteresis Deadband）消除顿挫。
+- **动态接管 mi_thermald**：自动停止官方温控服务，并在后台巡检防范系统服务（如 Joyose / powerkeeper）将其后台复活。
+- **息屏低功耗**：识别屏幕亮灭状态，息屏时自动将轮询放宽至 3000ms 并暂停频繁操作，允许 CPU 进入深休眠（C-State）。
+- **自带日志轮转**：守护进程内置大小监控，日志超过 1MB 自动重置，避免长时间运行把 `/data` 空间塞满或引起 I/O 延迟。
 
 ---
 
 ## 编译方法
 
-编译需要 Android NDK（r26 / r27 及以上，目标 `aarch64-linux-android34`）。
+编译需要 Android NDK（建议 r25 及以上版本，支持 API 34）。
 
 ### Windows 编译
-
-直接运行目录下的 `build.bat`（脚本会自动按 `ANDROID_NDK_HOME`、`ANDROID_NDK_ROOT`、`NDK_DIR`、`%LOCALAPPDATA%\Android\Sdk\ndk` 顺序探测 NDK 工具链）：
-
+直接双击运行或在终端执行目录下的 `build.bat`：
 ```cmd
 build.bat
 ```
-
-编译完成后会在 `bin/` 目录下生成两个二进制文件：
-
-- `bin/astra_thermald`：温控核心守护进程
-- `bin/astra_launcher`：独立启动器与外部 Supervisor 崩溃看护进程
+脚本会自动探测系统的 NDK 路径并生成 `bin/astra_thermald`。
 
 ### Linux / macOS 编译
-
+指定 NDK 编译器路径后直接执行 make：
 ```bash
-export ANDROID_NDK_HOME=/path/to/android-ndk
+export CC=$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang
 make
 ```
 
 ---
 
-## 部署与使用说明
+## 使用说明
 
-将编译好的二进制推送到手机 `/data/local/tmp/` 并赋予执行权限：
+编译完成后，通过 ADB 将二进制推送到手机：
 
 ```bash
 adb push bin/astra_thermald /data/local/tmp/astra_thermald
-adb push bin/astra_launcher /data/local/tmp/astra_launcher
-adb shell "su -c 'chmod 755 /data/local/tmp/astra_thermald /data/local/tmp/astra_launcher'"
+adb shell "su -c 'chmod 755 /data/local/tmp/astra_thermald'"
 ```
 
-### 方式一：通过独立启动器 `astra_launcher` 管理（推荐，带外部崩溃恢复保护）
-
+### 推荐启动命令（自动接管 + 场景感知）
 ```bash
-# 启动并接管官方 mi_thermald（默认 auto 动态场景感知）
-adb shell "su -c '/data/local/tmp/astra_launcher start auto'"
+# 前台调试运行
+su -c '/data/local/tmp/astra_thermald -p auto -t'
 
-# 运行中无缝热切换档位（auto | balance | esports | beast | stock | /odm/etc/thermal-normal.conf）
-adb shell "su -c '/data/local/tmp/astra_launcher profile esports'"
-
-# 查看当前运行状态、mi_thermald 状态与 FCC 电流限额
-adb shell "su -c '/data/local/tmp/astra_launcher status'"
-
-# 优雅停止并恢复启动前硬件状态与官方 mi_thermald
-adb shell "su -c '/data/local/tmp/astra_launcher stop'"
+# 后台静默守护运行
+su -c 'nohup /data/local/tmp/astra_thermald -p auto -t > /data/local/tmp/astra_thermald.log 2>&1 & echo $! > /data/local/tmp/astra_thermald.pid'
 ```
 
-### 方式二：直接运行 `astra_thermald`
-
+### 命令行参数
 ```text
-用法: astra_thermald [选项]
 选项:
   -p, --profile <name>   温控策略模式 (auto|beast|esports|balance|stock，默认: auto)
   -c, --config <file>    加载外部明文或加密的 .conf 策略配置文件
-  -t, --takeover         停用官方 mi_thermald 并接管硬件温控节点
-  -i, --interval <ms>    主循环采样周期 (100..10000 毫秒，默认: 1000)
-  -l, --log <file>       指定日志输出文件路径 (超过 1MB 自动截断轮转)
+  -t, --takeover         停用官方 mi_thermald 并全面接管硬件节点
+  -i, --interval <ms>    主循环采样周期 (毫秒，默认: 1000)
   -d, --daemon           以 daemon 形式在后台运行
   -v, --version          查看版本信息
   -h, --help             显示帮助信息
@@ -163,7 +147,13 @@ adb shell "su -c '/data/local/tmp/astra_launcher stop'"
 
 ---
 
-## 作者与开源协议
+## 作者与鸣谢
 
 - **作者**：Baizhi, Gemini
-- **开源协议**：本项目采用 **GNU General Public License v3.0 (GPL-3.0)** 协议开源，详见 [LICENSE](LICENSE) 文件。
+- **特别感谢**：开源社区中所有致力于高通平台性能调优与 Linux 内核热工架构研究的开发者。
+
+---
+
+## 开源协议
+
+本项目采用 **GNU General Public License v3.0 (GPL-3.0)** 协议开源，详情见 [LICENSE](LICENSE) 文件。
