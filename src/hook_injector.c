@@ -14,23 +14,28 @@ static bool s_lkm_available = false;
 static astra_profile_t s_last_synced_profile = (astra_profile_t)-1;
 
 int hook_injector_init(void) {
-    ASTRA_LOG_INFO("Initializing Privileged Hook Subsystem (Unconstrained KSU Power Mode)...");
     s_last_synced_profile = (astra_profile_t)-1;
 
     if (access(PATH_LKM_NODE, F_OK) == 0) {
         s_lkm_available = true;
-        ASTRA_LOG_INFO("Detected Active AstraCore LKM at %s! Kernel-level interop enabled.", PATH_LKM_NODE);
+        ASTRA_LOG_INFO("Detected Active AstraCore LKM at %s! Optional kernel-level interop enabled.", PATH_LKM_NODE);
     } else {
         s_lkm_available = false;
-        ASTRA_LOG_INFO("AstraCore LKM not loaded; running in Userspace Native Root Authority mode.");
+        ASTRA_LOG_INFO("Custom LKM not loaded; running in standalone Userspace Root mode.");
     }
 
     return 0;
 }
 
-int hook_sync_to_kernel_lkm(astra_profile_t profile, int32_t virtual_temp) {
-    (void)virtual_temp;
-    if (!s_lkm_available) return 0;
+int hook_sync_to_kernel_lkm(astra_profile_t profile) {
+
+    if (access(PATH_LKM_NODE, F_OK) != 0) {
+        s_lkm_available = false;
+        s_last_synced_profile = (astra_profile_t)-1;
+        return 0;
+    }
+    s_lkm_available = true;
+
     if (profile == s_last_synced_profile) return 0;
 
     int fd = open(PATH_LKM_NODE, O_WRONLY);
@@ -45,27 +50,20 @@ int hook_sync_to_kernel_lkm(astra_profile_t profile, int32_t virtual_temp) {
         default:                     prof_str = "balance"; break;
     }
 
-    ssize_t written = write(fd, prof_str, strlen(prof_str));
+    size_t expected_len = strlen(prof_str);
+    ssize_t written = write(fd, prof_str, expected_len);
+    int saved_err = errno;
     close(fd);
 
-    if (written > 0) {
-        s_last_synced_profile = profile;
-        ASTRA_LOG_INFO("[HOOK-LKM] Synced profile state -> '%s' to %s", prof_str, PATH_LKM_NODE);
+    if (written != (ssize_t)expected_len) {
+        return (written < 0) ? -saved_err : -EIO;
     }
-    return 0;
-}
 
-int hook_enforce_node_lock(const char *node_path, bool locked) {
-    if (!node_path) return -EINVAL;
-
-    mode_t mode = locked ? 0444 : 0644;
-    if (chmod(node_path, mode) < 0) {
-        ASTRA_LOG_WARN("Failed to chmod %s to %04o: %s", node_path, mode, strerror(errno));
-        return -errno;
-    }
+    s_last_synced_profile = profile;
+    ASTRA_LOG_INFO("[HOOK-LKM] Synced profile state -> '%s' to %s", prof_str, PATH_LKM_NODE);
     return 0;
 }
 
 void hook_injector_cleanup(void) {
-    ASTRA_LOG_INFO("Cleaning up privileged hook subsystem...");
+    s_last_synced_profile = (astra_profile_t)-1;
 }

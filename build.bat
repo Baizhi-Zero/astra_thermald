@@ -1,21 +1,40 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal EnableDelayedExpansion
 
-if "%NDK_DIR%"=="" set NDK_DIR=C:\Users\yuand\AppData\Local\Android\Sdk\ndk\26.0.10792818
-if not exist "%NDK_DIR%" (
-    if not "%ANDROID_NDK_HOME%"=="" set NDK_DIR=%ANDROID_NDK_HOME%
-    if not "%ANDROID_NDK_ROOT%"=="" set NDK_DIR=%ANDROID_NDK_ROOT%
+REM Priority 1: Environment variables (ANDROID_NDK_HOME / ANDROID_NDK_ROOT / NDK_DIR)
+if defined ANDROID_NDK_HOME (
+    set "RESOLVED_NDK=%ANDROID_NDK_HOME%"
+) else if defined ANDROID_NDK_ROOT (
+    set "RESOLVED_NDK=%ANDROID_NDK_ROOT%"
+) else if defined NDK_DIR (
+    set "RESOLVED_NDK=%NDK_DIR%"
+) else if exist "%LOCALAPPDATA%\Android\Sdk\ndk" (
+    for /f "delims=" %%D in ('dir /b /ad /o-n "%LOCALAPPDATA%\Android\Sdk\ndk"') do (
+        if exist "%LOCALAPPDATA%\Android\Sdk\ndk\%%D\toolchains\llvm\prebuilt\windows-x86_64\bin\aarch64-linux-android34-clang.cmd" (
+            set "RESOLVED_NDK=%LOCALAPPDATA%\Android\Sdk\ndk\%%D"
+            goto :ndk_found
+        )
+    )
 )
 
-set CC=%NDK_DIR%\toolchains\llvm\prebuilt\windows-x86_64\bin\aarch64-linux-android34-clang.cmd
-if not exist "%CC%" set CC=aarch64-linux-android34-clang
+:ndk_found
+if not defined RESOLVED_NDK (
+    set "RESOLVED_NDK=C:\Users\yuand\AppData\Local\Android\Sdk\ndk\26.0.10792818"
+)
 
-echo [BUILD] Building AstraThermald (SM8650) with GPL-3.0...
-echo [BUILD] Compiler: %CC%
+set "CC=%RESOLVED_NDK%\toolchains\llvm\prebuilt\windows-x86_64\bin\aarch64-linux-android34-clang.cmd"
+if not exist "%CC%" (
+    where aarch64-linux-android34-clang.cmd >nul 2>&1
+    if !ERRORLEVEL! equ 0 (
+        set "CC=aarch64-linux-android34-clang.cmd"
+    )
+)
 
+echo [BUILD] Using NDK Toolchain: %CC%
 if not exist bin mkdir bin
 
-call "%CC%" -O2 -Wall -Wextra -pthread -Iinclude ^
+echo [BUILD] 1/2 Compiling AstraThermald daemon...
+call "%CC%" -O2 -Wall -Wextra -Iinclude ^
     src\main.c ^
     src\sensor_hub.c ^
     src\virtual_synth.c ^
@@ -27,11 +46,20 @@ call "%CC%" -O2 -Wall -Wextra -pthread -Iinclude ^
     crypto\aes128.c ^
     -o bin\astra_thermald
 
-if %ERRORLEVEL% equ 0 (
-    echo [BUILD] SUCCESS: bin\astra_thermald
-) else (
-    echo [BUILD] FAILED with code %ERRORLEVEL%
-    exit /b %ERRORLEVEL%
+if !ERRORLEVEL! neq 0 (
+    echo [BUILD] FAILED building astra_thermald!
+    exit /b !ERRORLEVEL!
 )
 
+echo [BUILD] 2/2 Compiling AstraLauncher standalone supervisor...
+call "%CC%" -O2 -Wall -Wextra -Iinclude ^
+    src\astra_launcher.c ^
+    -o bin\astra_launcher
+
+if !ERRORLEVEL! neq 0 (
+    echo [BUILD] FAILED building astra_launcher!
+    exit /b !ERRORLEVEL!
+)
+
+echo [BUILD] SUCCESS! Outputs: bin\astra_thermald, bin\astra_launcher
 endlocal

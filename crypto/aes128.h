@@ -19,7 +19,14 @@
 extern "C" {
 #endif
 
+int aes128_ecb_decrypt_block(const uint8_t in_block[16],
+                             const uint8_t key[16],
+                             uint8_t out_block[16]);
+
 int aes128_extract_vendor_keys(uint8_t key[16], uint8_t iv[16]);
+
+int aes128_extract_and_verify_vendor_keys(const uint8_t *sample_ct, size_t ct_len,
+                                          uint8_t key[16], uint8_t iv[16]);
 
 int aes128_cbc_decrypt(const uint8_t *ciphertext, size_t ct_len,
                        const uint8_t *key, const uint8_t *iv,
